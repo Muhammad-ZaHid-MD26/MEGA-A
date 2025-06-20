@@ -1,108 +1,39 @@
-
-import dotenv from 'dotenv'
-dotenv.config()
-
-import { createRequire } from 'module'
+import fs from 'fs'
+import path from 'path'
+import pino from 'pino'
 import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
-import { platform } from 'process'
-import { existsSync, readFileSync, readdirSync, unlinkSync, watch } from 'fs'
-import { spawn } from 'child_process'
-import chalk from 'chalk'
-import lodash, { chain } from 'lodash'
-import { JSONFile, Low } from 'lowdb'
-import NodeCache from 'node-cache'
-import Pino from 'pino'
-import syntaxError from 'syntax-error'
-import { format } from 'util'
-import yargs from 'yargs'
-import readline from 'readline'
-import ws from 'ws'
+import { Low, JSONFile } from 'lowdb'
+import { makeInMemoryStore } from '@whiskeysockets/baileys'
 
-// ✅ Fixed Baileys Import
-import {
-  makeWASocket,
-  DisconnectReason,
-  useMultiFileAuthState,
-  MessageRetryMap,
-  fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
-  makeInMemoryStore,
-  Browsers,
-  proto,
-  delay,
-  jidNormalizedUser
-} from '@whiskeysockets/baileys'
+// Get __dirname (ESM compatible)
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
-import cloudDBAdapter from './lib/cloudDBAdapter.js'
-import { mongoDB, mongoDBV2 } from './lib/mongoDB.js'
-import { protoType, serialize } from './lib/simple.js'
-import socketInit from './lib/socket.js'
-import tempClear from './lib/tempclear.js'
+// Logger setup
+const logger = pino({ level: 'silent' })
 
-global.__filename = fileURLToPath(import.meta.url)
-global.__dirname = dirname(global.__filename)
-global.require = createRequire(import.meta.url)
+// Setup database (lowdb)
+const dbFile = path.join(__dirname, 'database.json')
+const adapter = new JSONFile(dbFile)
+const db = new Low(adapter)
 
-const logger = Pino({ level: 'silent' })
+await db.read()
+if (!db.data) {
+  db.data = { users: {}, chats: {}, stats: {}, msgs: {}, sticker: {}, settings: {} }
+  await db.write()
+}
+global.db = db
+
+// Setup memory store for Baileys
 const store = makeInMemoryStore({ logger })
-store?.readFromFile('./session/store.json')
+global.store = store
+
+// Read existing session store
+store?.readFromFile(path.join(__dirname, 'baileys_store.json'))
+
+// Auto-save store every 10 seconds
 setInterval(() => {
-  store?.writeToFile('./session/store.json')
-}, 10_000)
+  store?.writeToFile(path.join(__dirname, 'baileys_store.json'))
+}, 10000)
 
-const msgRetryCounterCache = new NodeCache()
-
-async function loadDatabase() {
-  global.DATABASE = new Low(new JSONFile('./database.json'))
-  global.db = DATABASE
-  await global.db.read()
-  global.db.data ||= { users: {}, chats: {}, stats: {}, msgs: {}, sticker: {}, settings: {} }
-  global.db.chain = chain(global.db.data)
-}
-global.loadDatabase = loadDatabase
-
-await loadDatabase()
-protoType()
-serialize()
-
-const { state, saveCreds } = await useMultiFileAuthState('./session')
-const connectionOptions = {
-  version: await fetchLatestBaileysVersion(),
-  logger,
-  printQRInTerminal: true,
-  browser: Browsers.macOS('Safari'),
-  auth: {
-    creds: state.creds,
-    keys: makeCacheableSignalKeyStore(state.keys, Pino({ level: 'silent' }))
-  },
-  markOnlineOnConnect: true,
-  generateHighQualityLinkPreview: true,
-  getMessage: async key => {
-    const jid = jidNormalizedUser(key.remoteJid)
-    const msg = await store.loadMessage(jid, key.id)
-    return msg?.message || ''
-  },
-  patchMessageBeforeSending: message => {
-    if (message.buttonsMessage || message.listMessage || message.templateMessage)
-      return {
-        viewOnceMessage: {
-          message: {
-            messageContextInfo: {
-              deviceListMetadataVersion: 2,
-              deviceListMetadata: {}
-            },
-            ...message
-          }
-        }
-      }
-    return message
-  },
-  msgRetryCounterCache,
-  defaultQueryTimeoutMs: undefined,
-  syncFullHistory: false
-}
-
-global.conn = makeWASocket(connectionOptions)
-conn.isInit = false
-store?.bind(conn.ev)
+console.log('✅ global.js loaded successfully')
